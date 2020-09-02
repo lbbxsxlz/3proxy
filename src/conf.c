@@ -777,13 +777,16 @@ int scanipl(unsigned char *arg, struct iplist *dst){
 #endif
         char * slash, *dash;
 	int masklen, addrlen;
+
 	if((slash = strchr((char *)arg, '/'))) *slash = 0;
 	if((dash = strchr((char *)arg,'-'))) *dash = 0;
 	
+	if(afdetect(arg) == -1) return 1;
 	if(!getip46(46, arg, (struct sockaddr *)&sa)) return 1;
 	memcpy(&dst->ip_from, SAADDR(&sa), SAADDRLEN(&sa));
 	dst->family = *SAFAMILY(&sa);
 	if(dash){
+		if(afdetect(dash+1) == -1) return 1;
 		if(!getip46(46, (unsigned char *)dash+1, (struct sockaddr *)&sa)) return 2;
 		memcpy(&dst->ip_to, SAADDR(&sa), SAADDRLEN(&sa));
 		if(*SAFAMILY(&sa) != dst->family || memcmp(&dst->ip_to, &dst->ip_from, SAADDRLEN(&sa)) < 0) return 3;
@@ -868,9 +871,11 @@ struct ace * make_ace (int argc, unsigned char ** argv){
 			do {
 			 int arglen;
 			 unsigned char *pattern;
+			 struct iplist tmpip={NULL};
 			 
 			 arglen = (int)strlen((char *)arg);
-			 if(arglen > 0 && (arg[arglen-1] < '0' || arg[arglen-1] > '9')){
+			 if(scanipl(arg, &tmpip)){
+				if(!arglen) continue;
 				if(!acl->dstnames) {
 					acl->dstnames = hostnamel = myalloc(sizeof(struct hostname));
 				}
@@ -914,11 +919,7 @@ struct ace * make_ace (int argc, unsigned char ** argv){
 					fprintf(stderr, "No memory for ACL entry, line %d\n", linenum);
 					return(NULL);
 				}
-				memset(ipl, 0, sizeof(struct iplist));
-				if (scanipl(arg, ipl)) {
-						fprintf(stderr, "Invalid IP, IP range or CIDR, line %d\n", linenum);
-						return(NULL);
-				}
+				*ipl = tmpip;
 			 }
 			}while((arg = (unsigned char *)strtok((char *)NULL, ",")));
 		}
@@ -1339,6 +1340,8 @@ static int h_authcache(int argc, unsigned char **argv){
 	if(strstr((char *) *(argv + 1), "user")) conf.authcachetype |= 2;
 	if(strstr((char *) *(argv + 1), "pass")) conf.authcachetype |= 4;
 	if(strstr((char *) *(argv + 1), "limit")) conf.authcachetype |= 8;
+	if(strstr((char *) *(argv + 1), "acl")) conf.authcachetype |= 16;
+	if(strstr((char *) *(argv + 1), "ext")) conf.authcachetype |= 32;
 	if(argc > 2) conf.authcachetime = (unsigned) atoi((char *) *(argv + 2));
 	if(!conf.authcachetype) conf.authcachetype = 6;
 	if(!conf.authcachetime) conf.authcachetime = 600;
@@ -1470,7 +1473,7 @@ static int h_chroot(int argc, unsigned char **argv){
 		fprintf(stderr, "Unable to set uid %d", (int)uid);
 		return(5);
 	}
-
+	chdir("/");
 	return 0;
 }
 #endif

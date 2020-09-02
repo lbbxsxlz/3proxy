@@ -55,7 +55,7 @@ int clientnegotiate(struct chain * redir, struct clientparam * param, struct soc
 			len += sprintf((char *)buf + len,
 				":%hu HTTP/1.0\r\nConnection: keep-alive\r\n", ntohs(*SAPORT(addr)));
 			if(user){
-				len += sprintf((char *)buf + len, "Proxy-authorization: Basic ");
+				len += sprintf((char *)buf + len, "Proxy-Authorization: Basic ");
 				sprintf((char *)username, "%.128s:%.128s", user, pass?pass:(unsigned char *)"");
 				en64(username, buf+len, (int)strlen((char *)username));
 				len = (int)strlen((char *)buf);
@@ -377,21 +377,34 @@ int ACLmatches(struct ace* acentry, struct clientparam * param){
 			}
 			while(i > 5 && param->hostname[i-1] == '.') param->hostname[i-1] = 0;
 			for(hstentry = acentry->dstnames; hstentry; hstentry = hstentry->next){
+				int lname, lhost;
 				switch(hstentry->matchtype){
 					case 0:
+#ifndef _WIN32
+					if(strcasestr((char *)param->hostname, (char *)hstentry->name)) match = 1;
+#else
 					if(strstr((char *)param->hostname, (char *)hstentry->name)) match = 1;
+#endif
 					break;
 
 					case 1:
-					if(strstr((char *)param->hostname, (char *)hstentry->name) == (char *)param->hostname) match = 1;
+					if(!strncasecmp((char *)param->hostname, (char *)hstentry->name, strlen((char *)hstentry->name)))
+						match = 1;
 					break;
 
 					case 2:
-					if(strstr((char *)param->hostname, (char *)hstentry->name) == (char *)(param->hostname + i - (strlen((char *)hstentry->name)))) match = 1;
+					lname = strlen((char *)hstentry->name);
+					lhost = strlen((char *)param->hostname);
+					if(lhost > lname){
+						if(!strncasecmp((char *)param->hostname + (lhost - lname),
+							(char *)hstentry->name,
+							lname))
+								match = 1;
+					}
 					break;
 
 					default:
-					if(!strcmp((char *)param->hostname, (char *)hstentry->name)) match = 1;
+					if(!strcasecmp((char *)param->hostname, (char *)hstentry->name)) match = 1;
 					break;
         			}
 				if(match) break;
@@ -693,10 +706,11 @@ struct authcache {
 	char * password;
 	time_t expires;
 #ifndef NOIPV6
-	struct sockaddr_in6 sa;
+	struct sockaddr_in6 sa, sinsl;
 #else
-	struct sockaddr_in sa;
+	struct sockaddr_in sa, sinsl;
 #endif
+	struct ace *acl;
 	struct authcache *next;
 } *authc = NULL;
 
@@ -721,13 +735,19 @@ int cacheauth(struct clientparam * param){
 			continue;
 			
 		}
-		if((!(conf.authcachetype&2) || (param->username && ac->username && !strcmp(ac->username, (char *)param->username))) &&
-		   (!(conf.authcachetype&4) || (ac->password && param->password && !strcmp(ac->password, (char *)param->password)))) {
+		if(
+		 (!(conf.authcachetype&2) || (param->username && ac->username && !strcmp(ac->username, (char *)param->username))) &&
+		 (!(conf.authcachetype&4) || (ac->password && param->password && !strcmp(ac->password, (char *)param->password))) &&
+		 (!(conf.authcachetype&16) || (ac->acl == param->srv->acl))
+		) {
 
 			if(!(conf.authcachetype&1)
 				|| ((*SAFAMILY(&ac->sa) ==  *SAFAMILY(&param->sincr) 
 				   && !memcmp(SAADDR(&ac->sa), SAADDR(&param->sincr), SAADDRLEN(&ac->sa))))){
 
+				if(conf.authcachetype&32) {
+					param->sinsl = ac->sinsl;
+				}
 				if(param->username){
 					myfree(param->username);
 				}
@@ -764,9 +784,12 @@ int doauth(struct clientparam * param){
 			if(conf.authcachetype && authfuncs->authenticate && authfuncs->authenticate != cacheauth && param->username && (!(conf.authcachetype&4) || (!param->pwtype && param->password))){
 				pthread_mutex_lock(&hash_mutex);
 				for(ac = authc; ac; ac = ac->next){
-					if((!(conf.authcachetype&2) || !strcmp(ac->username, (char *)param->username)) &&
+					if(
+					   (!(conf.authcachetype&2) || !strcmp(ac->username, (char *)param->username)) &&
 					   (!(conf.authcachetype&1) || (*SAFAMILY(&ac->sa) ==  *SAFAMILY(&param->sincr) && !memcmp(SAADDR(&ac->sa), SAADDR(&param->sincr), SAADDRLEN(&ac->sa))))  &&
-					   (!(conf.authcachetype&4) || (ac->password && !strcmp(ac->password, (char *)param->password)))) {
+					   (!(conf.authcachetype&4) || (ac->password && !strcmp(ac->password, (char *)param->password))) &&
+					   (!(conf.authcachetype&16) || (ac->acl == param->srv->acl))
+					) {
 						ac->expires = conf.time + conf.authcachetime;
 						if(strcmp(ac->username, (char *)param->username)){
 							tmp = ac->username;
@@ -779,6 +802,11 @@ int doauth(struct clientparam * param){
 							myfree(tmp);
 						}
 						ac->sa = param->sincr;
+						if(conf.authcachetype&32) {
+							ac->sinsl = param-> sinsl;
+							*SAPORT(&ac->sinsl) = 0;
+						}
+
 						break;
 					}
 				}
@@ -790,6 +818,10 @@ int doauth(struct clientparam * param){
 						ac->sa = param->sincr;
 						ac->password = NULL;
 						if((conf.authcachetype&4) && param->password) ac->password = mystrdup((char *)param->password);
+						if(conf.authcachetype&32) {
+							ac->sinsl = param->sinsl;
+							*SAPORT(&ac->sinsl) = 0;
+						}
 					}
 					ac->next = authc;
 					authc = ac;
